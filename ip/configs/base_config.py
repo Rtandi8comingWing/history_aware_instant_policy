@@ -18,7 +18,7 @@ config = {
     'num_demos_test': 2,
     'traj_horizon': 10,
     'device': 'cuda',
-    'batch_size': 16,
+    'batch_size': 4,
     'batch_size_val': 1,
     'num_scenes_nodes': 16,
     'pre_horizon': 8,

@@ -29,7 +29,7 @@ if __name__ == '__main__':
                         help='If fine-tuning, whether to compile models. When not fine-tuning, it is defined in the config')
     parser.add_argument('--data_path_train', type=str, default='./data/train',
                         help='Path to the training data.')
-    parser.add_argument('--batch_size', type=int, default=16,
+    parser.add_argument('--batch_size', type=int, default=None,
                         help='Batch size for fine-tuning. When not fine-tuning, it is defined in the config')
     parser.add_argument('--data_path_val', type=str, default='./data/val',
                         help='Path to the validation data.')
@@ -54,7 +54,8 @@ if __name__ == '__main__':
     if fine_tune:
         config = pickle.load(open(f'{model_path}/config.pkl', 'rb'))
         config['compile_models'] = False
-        config['batch_size'] = bs
+        if bs is not None:  # Only override if explicitly provided
+            config['batch_size'] = bs
         config['save_dir'] = save_dir
         config['record'] = record
         # TODO: Here you can change other parameter from the ones used to train initial model.
@@ -65,10 +66,24 @@ if __name__ == '__main__':
     else:
         config['save_dir'] = save_dir
         config['record'] = record
+        
+        # Check if scene_encoder.pt exists, if not disable pre-trained encoder
+        if not os.path.exists(config['scene_encoder_path']):
+            print(f"Warning: scene_encoder.pt not found at {config['scene_encoder_path']}")
+            print("Training from scratch without pre-trained scene encoder")
+            config['pre_trained_encoder'] = False
+        
         model = GraphDiffusion(config).to(config['device'])
     ####################################################################################################################
-    dset_val = RunningDataset(data_path_val, len(os.listdir(data_path_val)), rand_g_prob=0)
-    dataloader_val = DataLoader(dset_val, batch_size=1, shuffle=False)
+    # Validation data
+    if data_path_val and os.path.exists(data_path_val):
+        dset_val = RunningDataset(data_path_val, len(os.listdir(data_path_val)), rand_g_prob=0)
+        dataloader_val = DataLoader(dset_val, batch_size=1, shuffle=False)
+    else:
+        print("⚠️  No validation data found, skipping validation")
+        print("   Generate validation set: python generate_pseudo_data.py --val_tasks=10")
+        print("   详见文档: docs/updates/VALIDATION_SET_UPDATE.md")
+        dataloader_val = None
 
     dset = RunningDataset(data_path_train, len(os.listdir(data_path_train)), rand_g_prob=config['randomize_g_prob'])
     dataloader = DataLoader(dset, batch_size=config['batch_size'], drop_last=True, shuffle=True,
@@ -80,20 +95,27 @@ if __name__ == '__main__':
                                  name=f'{run_name}',
                                  save_dir=save_dir,
                                  log_model=False)
+        else:
+            logger = None  # 不使用 wandb 时也要定义 logger
         # Dump config to save_dir
         pickle.dump(config, open(f'{save_dir}/config.pkl', 'wb'))
     else:
         logger = None
     lr_monitor = LearningRateMonitor(logging_interval='step')
+    
+    # Determine precision based on device
+    precision = '16-mixed' if config['device'] == 'cuda' else '32'
+    
     trainer = L.Trainer(
         enable_checkpointing=False,  # We save the models manually.
         accelerator=config['device'],
         devices=1,
         max_steps=config['num_iters'],
         enable_progress_bar=True,
-        precision='16-mixed',
-        val_check_interval=20000,  # TODO: might want to change that.
-        num_sanity_val_steps=2,
+        precision=precision,  # Auto-adjust based on device
+        accumulate_grad_batches=8,  # Gradient accumulation for memory efficiency
+        val_check_interval=20000 if dataloader_val else None,  # Skip validation if no val set
+        num_sanity_val_steps=2 if dataloader_val else 0,
         check_val_every_n_epoch=None,
         logger=logger,
         log_every_n_steps=500,  # TODO: might want to change that.

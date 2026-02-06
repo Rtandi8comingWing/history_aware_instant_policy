@@ -1,0 +1,68 @@
+# Core Deep Learning
+torch==2.2.0
+torchaudio==2.2.0
+pytorch-lightning==2.4.0
+lightning==2.4.0
+lightning-utilities==0.11.8
+
+# PyTorch Geometric
+torch-geometric==2.5.0
+torch-cluster==1.6.3
+torch-scatter==2.1.2
+
+# Scientific Computing
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.5.1
+
+# Computer Vision & 3D
+open3d==0.18.0
+opencv-python
+pillow==11.0.0
+
+# 3D Rendering
+pyrender
+trimesh
+
+# Robotics & Simulation
+gymnasium==1.0.0
+pybullet
+
+# Data Processing
+pandas==2.2.3
+pyyaml==6.0.2
+joblib==1.4.2
+
+# Visualization
+matplotlib==3.9.2
+plotly==5.24.1
+dash==2.18.2
+
+# Utilities
+tqdm==4.66.5
+wandb==0.18.7
+gdown==5.2.0
+addict==2.4.0
+cloudpickle==3.1.0
+natsort==8.4.0
+pyquaternion==0.9.9
+
+# Configuration
+configargparse==1.7
+
+# Transformers & Diffusion (optional)
+transformers==4.46.2
+diffusers==0.31.0
+accelerate==1.1.1
+safetensors==0.4.5
+tokenizers==0.20.3
+huggingface-hub==0.26.2
+
+# Development
+ipython==8.29.0
+jupyter
+ipywidgets==8.1.5
+
+# Monitoring
+tensorboard
+psutil==5.9.0
