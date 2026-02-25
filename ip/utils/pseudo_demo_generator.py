@@ -37,13 +37,10 @@ class PseudoDemoGenerator:
         # Gripper model (Robotiq 2F-85)
         self.gripper_mesh = self._create_gripper_mesh()
         self.gripper_keypoints = self._create_gripper_keypoints()
-        
+
         # Object tracking for attachment/detachment
         self.attached_object = None
         self.attachment_offset = None
-
-        # Reuse renderer across calls to avoid EGL context issues
-        self.renderer = pyrender.OffscreenRenderer(image_width, image_height)
         
     def _create_gripper_mesh(self):
         """
@@ -583,90 +580,74 @@ class PseudoDemoGenerator:
             # Update object pose in scene
             scene.set_pose(self.attached_object, new_obj_pose)
     
-    def render_observations(self, scene: pyrender.Scene, 
+    def render_observations(self, scene: pyrender.Scene,
                           gripper_poses: List[np.ndarray],
                           camera_names: List[str] = ['camera_front', 'camera_left', 'camera_right'],
                           target_points: int = 4096) -> List[np.ndarray]:
         """
-        Render depth images and convert to segmented point clouds.
-        
-        Paper: "initialise a mesh of a Robotiq 2F-85 gripper"
-        
-        Args:
-            scene: PyRender scene
-            gripper_poses: List of gripper poses
-            camera_names: Names of cameras to render from
-            target_points: Target number of points after subsampling
-            
-        Returns:
-            List of point clouds (one per gripper pose)
+        Generate point clouds via trimesh surface sampling (no OpenGL needed).
+        Fast CPU-based alternative to depth rendering.
         """
-        # Add gripper mesh to scene (paper: "initialise a mesh of a Robotiq 2F-85 gripper")
-        gripper_node = pyrender.Mesh.from_trimesh(self.gripper_mesh, smooth=False)
-        gripper_scene_node = scene.add(gripper_node, pose=gripper_poses[0], name='gripper_mesh')
-        
+        # Collect all meshes with their current world poses
+        scene_meshes = []
+        for node in scene.mesh_nodes:
+            mesh = node.mesh
+            pose = scene.get_pose(node)
+            for primitive in mesh.primitives:
+                # Reconstruct trimesh from primitive
+                tm = trimesh.Trimesh(
+                    vertices=primitive.positions,
+                    faces=primitive.indices if primitive.indices is not None else None,
+                    process=False
+                )
+                if len(tm.faces) == 0:
+                    continue
+                tm.apply_transform(pose)
+                scene_meshes.append(tm)
+
+        # Add gripper mesh
+        gripper_tm = self.gripper_mesh.copy()
+
         point_clouds = []
-        
-        for pose_idx, pose in enumerate(gripper_poses):
-            # Update gripper pose in scene
-            scene.set_pose(gripper_scene_node, pose)
-            
-            combined_pcd = []
-            
-            # Render from each camera
-            for cam_name in camera_names:
-                cam_node = list(scene.get_nodes(name=cam_name))[0]
-                
-                # Render depth
-                depth = self.renderer.render(scene, flags=pyrender.RenderFlags.DEPTH_ONLY)
-                
-                # Convert depth to point cloud
-                pcd = self._depth_to_pointcloud(depth, scene.get_pose(cam_node))
-                
-                # Simple segmentation: remove table and far points
-                # Keep points above table (z > 0.05) and within reasonable distance
-                valid_mask = (pcd[:, 2] > 0.05) & (pcd[:, 2] < 1.0)
-                pcd = pcd[valid_mask]
-                
-                # Further filter by distance from objects center
-                workspace_center = np.array([0, 0, 0.1])
-                distances = np.linalg.norm(pcd - workspace_center, axis=1)
-                pcd = pcd[distances < 0.5]  # Keep points within 50cm of center
-                
-                combined_pcd.append(pcd)
-            
-            # Combine point clouds from all cameras
-            if len(combined_pcd) > 0 and all(len(p) > 0 for p in combined_pcd):
-                combined_pcd = np.concatenate(combined_pcd, axis=0)
+        for pose in gripper_poses:
+            # Transform gripper mesh to current pose
+            g = gripper_tm.copy()
+            g.apply_transform(pose)
+
+            # Sample points from all meshes
+            all_pts = []
+            for tm in scene_meshes:
+                pts, _ = trimesh.sample.sample_surface(tm, 512)
+                # Filter: above table, within workspace
+                valid = (pts[:, 2] > 0.05) & (pts[:, 2] < 1.0)
+                pts = pts[valid]
+                dist = np.linalg.norm(pts - np.array([0, 0, 0.1]), axis=1)
+                pts = pts[dist < 0.5]
+                if len(pts) > 0:
+                    all_pts.append(pts)
+
+            # Sample gripper points
+            g_pts, _ = trimesh.sample.sample_surface(g, 256)
+            all_pts.append(g_pts)
+
+            if len(all_pts) > 0:
+                combined = np.concatenate(all_pts, axis=0)
             else:
-                # Fallback: create minimal point cloud
-                combined_pcd = np.random.randn(100, 3) * 0.05
-            
-            # Ensure we have points
-            if len(combined_pcd) == 0:
-                combined_pcd = np.random.randn(target_points, 3) * 0.05
-            
-            # Subsample to target number of points
-            if len(combined_pcd) > target_points:
-                indices = np.random.choice(len(combined_pcd), target_points, replace=False)
-                combined_pcd = combined_pcd[indices]
-            elif len(combined_pcd) < target_points and len(combined_pcd) > 0:
-                # Upsample with replacement
-                indices = np.random.choice(len(combined_pcd), target_points, replace=True)
-                combined_pcd = combined_pcd[indices]
-            elif len(combined_pcd) == 0:
-                # Edge case: no valid points
-                combined_pcd = np.random.randn(target_points, 3) * 0.05
-            
-            # Transform to gripper frame (paper mentions observations in end-effector frame)
+                combined = np.random.randn(target_points, 3) * 0.05
+
+            # Subsample to target
+            if len(combined) >= target_points:
+                idx = np.random.choice(len(combined), target_points, replace=False)
+            else:
+                idx = np.random.choice(len(combined), target_points, replace=True)
+            combined = combined[idx]
+
+            # Transform to gripper frame
             gripper_inv = np.linalg.inv(pose)
-            combined_pcd_homog = np.concatenate([combined_pcd, np.ones((len(combined_pcd), 1))], axis=1)
-            combined_pcd_gripper = (gripper_inv @ combined_pcd_homog.T).T[:, :3]
-            
-            point_clouds.append(combined_pcd_gripper)
-        
-        # Remove gripper mesh from scene
-        scene.remove_node(gripper_scene_node)
+            homog = np.concatenate([combined, np.ones((len(combined), 1))], axis=1)
+            combined = (gripper_inv @ homog.T).T[:, :3]
+
+            point_clouds.append(combined)
 
         return point_clouds
     

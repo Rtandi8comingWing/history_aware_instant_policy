@@ -17,7 +17,11 @@ class ShapeNetLoader:
         self.shapenet_root = shapenet_root
         self.categories = self._load_categories()
         self.object_cache = {}
+        self._cache_lock = __import__('threading').Lock()
         print(f"ShapeNet Loader initialized with {len(self.categories)} categories")
+        # Pre-load a pool of meshes into memory for fast sampling
+        self._preloaded_meshes = []
+        self._preload_mesh_pool(pool_size=500)
         
     def _load_categories(self):
         """Load all available ShapeNet categories."""
@@ -39,17 +43,37 @@ class ShapeNetLoader:
                 
         return categories
     
+    def _preload_mesh_pool(self, pool_size=500):
+        """Pre-load a pool of meshes into memory to avoid repeated network I/O."""
+        import random as _random
+        print(f"Pre-loading {pool_size} meshes into memory...")
+        all_paths = [p for paths in self.categories.values() for p in paths]
+        sampled_paths = _random.sample(all_paths, min(pool_size, len(all_paths)))
+        loaded = 0
+        for model_path in sampled_paths:
+            try:
+                mesh = trimesh.load(model_path, force='mesh', skip_materials=True)
+                bounds = mesh.bounds
+                size = bounds[1] - bounds[0]
+                max_dim = np.max(size)
+                if max_dim > 0:
+                    mesh.apply_scale(0.15 / max_dim)
+                mesh.vertices -= mesh.centroid
+                if len(mesh.faces) > 0:
+                    self._preloaded_meshes.append(mesh)
+                    loaded += 1
+            except Exception:
+                continue
+        print(f"Pre-loaded {loaded} meshes into memory")
+
     def get_random_objects(self, n=2, same_category=False):
         """
-        Sample random objects from ShapeNet.
-        
-        Args:
-            n: Number of objects to sample
-            same_category: If True, sample from the same category
-            
-        Returns:
-            List of trimesh objects
+        Sample random objects from the preloaded mesh pool.
         """
+        if self._preloaded_meshes:
+            return [m.copy() for m in random.sample(self._preloaded_meshes, min(n, len(self._preloaded_meshes)))]
+
+        # Fallback: load from disk
         objects = []
         
         if same_category:
@@ -67,20 +91,30 @@ class ShapeNetLoader:
         # Load meshes
         for model_path in model_paths:
             try:
+                # Check cache first
+                with self._cache_lock:
+                    if model_path in self.object_cache:
+                        objects.append(self.object_cache[model_path].copy())
+                        continue
+
                 # Load with trimesh, skip textures (only need geometry for depth rendering)
                 mesh = trimesh.load(model_path, force='mesh', skip_materials=True)
-                
+
                 # Normalize scale (paper uses objects of similar size)
                 bounds = mesh.bounds
                 size = bounds[1] - bounds[0]
                 max_dim = np.max(size)
                 if max_dim > 0:
                     mesh.apply_scale(0.15 / max_dim)  # Scale to ~15cm max dimension
-                
+
                 # Center the mesh
                 mesh.vertices -= mesh.centroid
-                
-                objects.append(mesh)
+
+                # Cache the processed mesh
+                with self._cache_lock:
+                    self.object_cache[model_path] = mesh
+
+                objects.append(mesh.copy())
             except Exception as e:
                 print(f"Failed to load {model_path}: {e}")
                 # Retry with another object
