@@ -7,7 +7,7 @@ config = {
     'scene_encoder_path': './checkpoints/scene_encoder.pt',
     'pre_trained_encoder': True,
     'freeze_encoder': True,
-    'save_every': 100000,
+    'save_every': 5000,
     'compile_models': False,
     # Model config
     'local_num_freq': 10,
