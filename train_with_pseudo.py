@@ -110,6 +110,8 @@ def main():
                        help='Where to save models and logs')
     
     # Fine-tuning settings
+    parser.add_argument('--resume_from', type=str, default=None,
+                       help='Path to checkpoint to resume training from (restores optimizer state and step count)')
     parser.add_argument('--fine_tune', type=int, default=0,
                        help='Fine-tune from existing model [0, 1]')
     parser.add_argument('--model_path', type=str, default='./checkpoints',
@@ -160,7 +162,21 @@ def main():
         print("  --num_generator_threads=1 --buffer_size=500")
     
     # Create or load model
-    if fine_tune:
+    if args.resume_from:
+        print(f"\nResuming training from {args.resume_from}...")
+        resume_dir = os.path.dirname(args.resume_from)
+        config_loaded = pickle.load(open(f'{resume_dir}/config.pkl', 'rb'))
+        config_loaded['save_dir'] = save_dir
+        config_loaded['record'] = record
+        config_loaded['batch_size'] = args.batch_size
+        model = GraphDiffusion.load_from_checkpoint(
+            args.resume_from,
+            config=config_loaded,
+            strict=True,
+            map_location=config_loaded['device']
+        ).to(config_loaded['device'])
+        current_config = config_loaded
+    elif fine_tune:
         print(f"\nLoading model from {args.model_path}/{args.model_name}...")
         config_loaded = pickle.load(open(f'{args.model_path}/config.pkl', 'rb'))
         config_loaded['compile_models'] = compile_models
@@ -276,7 +292,8 @@ def main():
         trainer.fit(
             model=model,
             train_dataloaders=train_dataloader,
-            val_dataloaders=dataloader_val
+            val_dataloaders=dataloader_val,
+            ckpt_path=args.resume_from if args.resume_from else None
         )
     finally:
         # Always stop generation threads
