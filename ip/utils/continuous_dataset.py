@@ -222,14 +222,13 @@ class ContinuousPseudoDataset(Dataset):
     
     def __getitem__(self, idx):
         """Get a sample from the buffer."""
-        try:
-            # Get from buffer (blocks if empty)
-            sample = self.buffer.get(timeout=10.0)
-            return sample
-        except queue.Empty:
-            print("Warning: Buffer empty, waiting for generation...")
-            time.sleep(1.0)
-            return self.buffer.get(timeout=10.0)
+        while True:
+            try:
+                return self.buffer.get(timeout=5.0)
+            except queue.Empty:
+                if self.stop_generation.is_set():
+                    raise RuntimeError("Generation stopped and buffer is empty")
+                print("Warning: Buffer empty, waiting for generation...")
     
     def get_statistics(self):
         """Get generation statistics."""

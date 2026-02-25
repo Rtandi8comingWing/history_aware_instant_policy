@@ -10,7 +10,7 @@ FULLY COMPLIANT with paper requirements:
 """
 import os
 # Set EGL platform for headless rendering BEFORE importing pyrender
-os.environ['PYOPENGL_PLATFORM'] = 'egl'
+os.environ['PYOPENGL_PLATFORM'] = os.environ.get('PYOPENGL_PLATFORM', 'egl')
 
 import numpy as np
 import trimesh
