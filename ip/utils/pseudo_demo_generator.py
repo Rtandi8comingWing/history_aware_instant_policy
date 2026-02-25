@@ -8,6 +8,10 @@ FULLY COMPLIANT with paper requirements:
 - Biased sampling for common tasks (grasp, place, push, open, close)
 - Robotiq 2F-85 gripper mesh
 """
+import os
+# Set EGL platform for headless rendering BEFORE importing pyrender
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+
 import numpy as np
 import trimesh
 import pyrender
@@ -37,6 +41,9 @@ class PseudoDemoGenerator:
         # Object tracking for attachment/detachment
         self.attached_object = None
         self.attachment_offset = None
+
+        # Reuse renderer across calls to avoid EGL context issues
+        self.renderer = pyrender.OffscreenRenderer(image_width, image_height)
         
     def _create_gripper_mesh(self):
         """
@@ -594,9 +601,6 @@ class PseudoDemoGenerator:
         Returns:
             List of point clouds (one per gripper pose)
         """
-        # Create renderer
-        renderer = pyrender.OffscreenRenderer(self.image_width, self.image_height)
-        
         # Add gripper mesh to scene (paper: "initialise a mesh of a Robotiq 2F-85 gripper")
         gripper_node = pyrender.Mesh.from_trimesh(self.gripper_mesh, smooth=False)
         gripper_scene_node = scene.add(gripper_node, pose=gripper_poses[0], name='gripper_mesh')
@@ -614,7 +618,7 @@ class PseudoDemoGenerator:
                 cam_node = list(scene.get_nodes(name=cam_name))[0]
                 
                 # Render depth
-                depth = renderer.render(scene, flags=pyrender.RenderFlags.DEPTH_ONLY)
+                depth = self.renderer.render(scene, flags=pyrender.RenderFlags.DEPTH_ONLY)
                 
                 # Convert depth to point cloud
                 pcd = self._depth_to_pointcloud(depth, scene.get_pose(cam_node))
@@ -663,8 +667,7 @@ class PseudoDemoGenerator:
         
         # Remove gripper mesh from scene
         scene.remove_node(gripper_scene_node)
-        
-        renderer.delete()
+
         return point_clouds
     
     def _depth_to_pointcloud(self, depth: np.ndarray, camera_pose: np.ndarray,
@@ -764,18 +767,22 @@ class PseudoDemoGenerator:
         # Create scene
         scene = self.create_scene(objects)
         self.setup_cameras(scene)
-        
+
         # Sample waypoints (paper: 2-6, 50% biased sampling)
         waypoints = self.sample_waypoints(scene, objects)
-        
+
         # Generate trajectory with object attachment/detachment
-        # Paper: "attaching or detaching the closest object to it when the 
+        # Paper: "attaching or detaching the closest object to it when the
         # gripper state changes"
         poses, gripper_states = self.generate_trajectory(waypoints, scene, objects)
-        
+
         # Render observations (with gripper mesh)
         point_clouds = self.render_observations(scene, poses)
-        
+
+        # Explicitly clear scene to free memory
+        scene.clear()
+        del scene
+
         # Data augmentation (30% disturbance, 10% gripper flip)
         poses, gripper_states, point_clouds = self.add_data_augmentation(
             poses, gripper_states, point_clouds

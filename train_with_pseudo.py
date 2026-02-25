@@ -155,6 +155,9 @@ def main():
     if args.real_data_path:
         print(f"Real data: {args.real_data_path} (ratio: {args.real_data_ratio})")
     print("=" * 80)
+    if args.num_generator_threads > 2:
+        print("Tip: If the process is killed (OOM) or workers keep failing, try:")
+        print("  --num_generator_threads=1 --buffer_size=500")
     
     # Create or load model
     if fine_tune:
@@ -201,7 +204,8 @@ def main():
         pred_horizon=current_config['pre_horizon'],
         buffer_size=args.buffer_size,
         num_generator_threads=args.num_generator_threads,
-        rand_g_prob=current_config['randomize_g_prob']
+        rand_g_prob=current_config['randomize_g_prob'],
+        num_context_demos=current_config['num_demos']
     )
     
     # Create dataloader (possibly mixed with real data)
