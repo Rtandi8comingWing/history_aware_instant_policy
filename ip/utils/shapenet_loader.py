@@ -67,8 +67,8 @@ class ShapeNetLoader:
         # Load meshes
         for model_path in model_paths:
             try:
-                # Load with trimesh
-                mesh = trimesh.load(model_path, force='mesh')
+                # Load with trimesh, skip textures (only need geometry for depth rendering)
+                mesh = trimesh.load(model_path, force='mesh', skip_materials=True)
                 
                 # Normalize scale (paper uses objects of similar size)
                 bounds = mesh.bounds
