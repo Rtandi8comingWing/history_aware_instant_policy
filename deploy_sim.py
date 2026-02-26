@@ -17,9 +17,12 @@ if __name__ == '__main__':
     parser.add_argument('--num_demos', type=int, default=2)
     parser.add_argument('--num_rollouts', type=int, default=10)
     parser.add_argument('--restrict_rot', type=int, default=1)
+    parser.add_argument('--headless', type=int, default=1,
+                        help='Run CoppeliaSim headless [0, 1]')
     
     args = parser.parse_args()
     restrict_rot = bool(args.restrict_rot)
+    headless = bool(args.headless)
     task_name = args.task_name
     num_demos = args.num_demos
     num_rollouts = args.num_rollouts
@@ -58,5 +61,5 @@ if __name__ == '__main__':
     model.eval()
     ####################################################################################################################
     sr = rollout_model(model, num_demos, task_name, num_rollouts=num_rollouts, execution_horizon=8,
-                       num_traj_wp=config['traj_horizon'], restrict_rot=restrict_rot)
+                       num_traj_wp=config['traj_horizon'], restrict_rot=restrict_rot, headless=headless)
     print('Success rate:', sr)
