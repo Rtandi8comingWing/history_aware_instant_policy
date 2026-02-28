@@ -129,36 +129,32 @@ class ContinuousPseudoDataset(Dataset):
         # Sample objects for this pseudo-task
         objects = self.shapenet_loader.get_random_objects(n=2)
         
-        # Generate multiple demonstrations
-        demos = []
+        # Generate multiple raw demonstrations (dense trajectory, 1cm spacing)
+        raw_demos = []
         for _ in range(self.num_demos_per_task):
             demo = generator.generate_pseudo_demonstration(objects)
-            cond_demo = sample_to_cond_demo(demo, self.num_traj_wp)
-            demos.append(cond_demo)
-        
+            raw_demos.append(demo)
+
         # Select one demo as "live", others as context
-        live_idx = np.random.randint(0, len(demos))
-        
-        # Convert live demo
-        live_demo_dict = {
-            'pcds': demos[live_idx]['obs'],
-            'T_w_es': demos[live_idx]['T_w_es'],
-            'grips': demos[live_idx]['grips']
-        }
+        live_idx = np.random.randint(0, len(raw_demos))
+
+        # Live demo: use raw dense trajectory + subsample=True (1cm spacing)
+        # This ensures actions stay within normalizer range (±0.01m/step)
         live_demo = sample_to_live(
-            live_demo_dict,
+            raw_demos[live_idx],
             pred_horizon=self.pred_horizon,
-            subsample=False
+            subsample=True
         )
-        
+
         # Select context demos (fixed number for batching)
-        context_indices = [i for i in range(len(demos)) if i != live_idx]
+        context_indices = [i for i in range(len(raw_demos)) if i != live_idx]
         if len(context_indices) >= self.num_context_demos:
             context_indices = np.random.choice(context_indices, self.num_context_demos, replace=False)
         else:
             # If not enough demos, sample with replacement
             context_indices = np.random.choice(context_indices, self.num_context_demos, replace=True)
-        context_demos = [demos[i] for i in context_indices]
+        # Context demos: compress to num_traj_wp waypoints for fixed-size batching
+        context_demos = [sample_to_cond_demo(raw_demos[i], self.num_traj_wp) for i in context_indices]
         
         # Randomly select one timestep from live trajectory
         timestep_idx = np.random.randint(0, len(live_demo['obs']))
