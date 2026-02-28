@@ -18,6 +18,9 @@ from pathlib import Path
 import lightning as L
 import pickle
 import torch
+
+# Enable Tensor Cores on Ampere/Ada GPUs (RTX 3080Ti, 4090D, etc.)
+torch.set_float32_matmul_precision('high')
 from torch_geometric.data import DataLoader
 from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import WandbLogger
