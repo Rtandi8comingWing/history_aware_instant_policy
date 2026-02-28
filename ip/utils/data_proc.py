@@ -229,22 +229,13 @@ def subsample_pcd(sample, num_points=2048):
     # Handle edge cases
     if len(sample) == 0:
         return np.random.randn(num_points, 3) * 0.01
-    
-    # Try statistical outlier removal
-    try:
-        sample_filtered, _ = remove_statistical_outliers(sample, nb_neighbors=min(20, len(sample)//2), std_ratio=2.0)
-        if len(sample_filtered) == 0:
-            sample_filtered = sample
-    except:
-        sample_filtered = sample
-    
-    # Ensure we have valid points
-    if len(sample_filtered) == 0:
-        return np.random.randn(num_points, 3) * 0.01
-    
-    # Subsample
-    rand_idx = np.random.choice(len(sample_filtered), num_points, replace=True if len(sample_filtered) < num_points else False)
-    return sample_filtered[rand_idx]
+
+    # Subsample directly — pseudo-demo point clouds from trimesh are already
+    # clean, so statistical outlier removal (Open3D) is unnecessary and
+    # causes segfaults when called from background threads.
+    rand_idx = np.random.choice(len(sample), num_points,
+                                replace=len(sample) < num_points)
+    return sample[rand_idx]
 
 
 def remove_statistical_outliers(point_cloud, nb_neighbors=20, std_ratio=2.0):
