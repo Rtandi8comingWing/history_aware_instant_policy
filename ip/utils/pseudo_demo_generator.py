@@ -23,6 +23,12 @@ class PseudoDemoGenerator:
         self.gripper_mesh = self._create_gripper_mesh()
         self.gripper_keypoints = self._create_gripper_keypoints()
 
+        # Pre-sample gripper points once in canonical frame (avoid per-frame trimesh calls)
+        if len(self.gripper_mesh.faces) > 0:
+            self._gripper_pts_canonical, _ = trimesh.sample.sample_surface(self.gripper_mesh, 256)
+        else:
+            self._gripper_pts_canonical = np.zeros((256, 3))
+
         # Object tracking for attachment/detachment
         self.attached_object = None   # index into scene['objects']
         self.attachment_offset = None  # 4x4 offset in gripper frame
@@ -284,15 +290,15 @@ class PseudoDemoGenerator:
 
         scene_pts = np.concatenate(scene_pts_list, axis=0) if scene_pts_list else np.zeros((0, 3))
 
+        # Pre-transform gripper canonical points per pose (pure numpy, no trimesh per frame)
         point_clouds = []
         for pose in gripper_poses:
-            # Sample gripper points for this pose
-            g = self.gripper_mesh.copy()
-            g.apply_transform(pose)
+            # Transform pre-sampled canonical gripper pts to world frame
+            homog_g = np.concatenate([self._gripper_pts_canonical,
+                                      np.ones((len(self._gripper_pts_canonical), 1))], axis=1)
+            g_pts = (pose @ homog_g.T).T[:, :3]
             all_pts = [scene_pts] if len(scene_pts) > 0 else []
-            if len(g.faces) > 0:
-                g_pts, _ = trimesh.sample.sample_surface(g, 256)
-                all_pts.append(g_pts)
+            all_pts.append(g_pts)
 
             combined = np.concatenate(all_pts, axis=0) if all_pts else np.random.randn(target_points, 3) * 0.05
 
