@@ -116,7 +116,7 @@ class GraphDiffusion(L.LightningModule):
 
         loss = self.loss_f(preds, labels)
 
-        self.log("Train_Loss", loss.mean(), on_step=False, on_epoch=True, prog_bar=True)
+        self.log("Train_Loss", loss.mean(), on_step=True, on_epoch=False, prog_bar=True)
         return loss
 
     def validation_step(self, data, batch_idx, vis=False, ret_actions=False):
