@@ -1,0 +1,497 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+本文件为 Claude Code (claude.ai/code) 提供在此代码库中工作的指导。
+
+---
+
+## Project Overview / 项目概述
+
+This is an implementation of **Instant Policy: In-Context Imitation Learning via Graph Diffusion** (ICLR 2025). The project uses graph diffusion models for in-context imitation learning, with a complete ShapeNet pseudo-demonstration generation system following the paper's Appendix D specifications.
+
+这是 **Instant Policy: In-Context Imitation Learning via Graph Diffusion** (ICLR 2025) 的实现。项目使用图扩散模型进行上下文模仿学习，包含完整的 ShapeNet 伪演示生成系统，严格遵循论文附录 D 的规范。
+
+**Key Components / 核心组件:**
+- Graph diffusion model (AGI) for policy learning / 图扩散模型用于策略学习
+- ShapeNet-based pseudo-demonstration generation / 基于 ShapeNet 的伪演示生成
+- RLBench simulation environment for evaluation / RLBench 仿真环境用于评估
+- PyTorch Lightning training framework with PyTorch Geometric / 使用 PyTorch Geometric 的 PyTorch Lightning 训练框架
+
+---
+
+## Development Commands / 开发命令
+
+### Environment Setup / 环境设置
+
+```bash
+# Activate conda environment / 激活 conda 环境
+conda activate ip_env
+
+# Install package in development mode (if needed) / 开发模式安装（如需要）
+pip install -e .
+```
+
+### Training / 训练
+
+**Continuous generation (recommended, paper approach) / 连续生成（推荐，论文方法）:**
+
+```bash
+# Quick test (1K samples) / 快速测试（1K 样本）
+python train_with_pseudo.py --run_name=test --num_pseudo_samples=1000 --buffer_size=100
+
+# Full scale (700K samples, paper setting) / 完整规模（700K 样本，论文设置）
+python train_with_pseudo.py --run_name=full_scale --num_pseudo_samples=700000 --buffer_size=2000 --record=1
+```
+
+**Pre-generated data / 预生成数据:**
+
+```bash
+# Generate data first / 先生成数据
+python generate_pseudo_data.py --num_tasks=1000 --output_dir=./data/pseudo_train --num_workers=4
+
+# Train with pre-generated data / 使用预生成数据训练
+python ip/train.py --run_name=my_experiment --data_path_train=./data/pseudo_train --data_path_val=./data/val --record=1
+```
+
+**Fine-tuning (PD++ setup) / 微调（PD++ 设置）:**
+
+```bash
+python train_with_pseudo.py --fine_tune=1 --model_path=./checkpoints --real_data_path=./data/rlbench --real_data_ratio=0.5
+```
+
+### Testing and Evaluation / 测试与评估
+
+**Simulation deployment / 仿真部署:**
+
+```bash
+# Basic evaluation / 基础评估
+python deploy_sim.py --task_name=plate_out --num_demos=2 --num_rollouts=10
+
+# Custom model path / 自定义模型路径
+python deploy_sim.py --model_path=./runs/my_experiment --task_name=open_box --num_demos=3
+```
+
+**Available RLBench tasks / 可用的 RLBench 任务:**
+plate_out, stack_blocks, open_box, close_box, phone_on_base, toilet_seat_down, etc. (see `sim_utils.py` for full list / 完整列表见 `sim_utils.py`)
+
+### Data Generation / 数据生成
+
+```bash
+# Generate pseudo-demonstrations with validation set / 生成伪演示和验证集
+python generate_pseudo_data.py --num_tasks=100 --val_tasks=10 --num_workers=4
+
+# Visualize generated data / 可视化生成的数据
+python visualize_pseudo_data_simple.py  # Simple visualization / 简单可视化
+python visualize_pseudo_data.py         # Full visualization with animations / 完整可视化（含动画）
+```
+
+### Utilities / 工具脚本
+
+```bash
+# Quick start script (interactive) / 快速启动脚本（交互式）
+./quick_start_shapenet.sh
+
+# Checkpoint management / Checkpoint 管理
+./manage_checkpoints.sh list <run_name>
+./manage_checkpoints.sh prepare <run_name> <checkpoint>
+./manage_checkpoints.sh clean <run_name> [keep_n]
+```
+
+---
+
+## Architecture Overview / 架构概述
+
+### Model Architecture (AGI - Action Generation via Imitation) / 模型架构
+
+The model consists of several key components that work together:
+
+模型由多个关键组件协同工作：
+
+**1. Scene Encoder / 场景编码器** (`ip/models/scene_encoder.py`):
+- Encodes point cloud observations into local embeddings / 将点云观测编码为局部嵌入
+- Uses positional encoding with 10 frequency bands / 使用 10 个频率带的位置编码
+- Output dimension: 512 (configurable via `local_nn_dim`) / 输出维度：512（可通过 `local_nn_dim` 配置）
+- Can be pre-trained and frozen / 可以预训练并冻结
+
+**2. Graph Representation / 图表示** (`ip/models/graph_rep.py`):
+- Constructs heterogeneous graph with scene nodes and gripper nodes / 构建包含场景节点和夹爪节点的异构图
+- Scene nodes: `num_scenes_nodes` (default 16) per observation / 场景节点：每个观测 `num_scenes_nodes` 个（默认 16）
+- Gripper nodes: 6 keypoints representing gripper pose / 夹爪节点：6 个关键点表示夹爪姿态
+- Edge types: scene-scene, scene-gripper, gripper-gripper / 边类型：场景-场景、场景-夹爪、夹爪-夹爪
+
+**3. Graph Transformer / 图 Transformer** (`ip/models/graph_transformer.py`):
+- Processes the heterogeneous graph using attention mechanisms / 使用注意力机制处理异构图
+- Hidden dimension: `hidden_dim` (default 1024) / 隐藏维度：`hidden_dim`（默认 1024）
+- Number of layers: `num_layers` (default 2) / 层数：`num_layers`（默认 2）
+- Attention heads: `hidden_dim // 64` / 注意力头数：`hidden_dim // 64`
+
+**4. Diffusion Model / 扩散模型** (`ip/models/diffusion.py`):
+- Uses DDIM scheduler for denoising / 使用 DDIM 调度器进行去噪
+- Training: 100 diffusion steps / 训练：100 个扩散步骤
+- Inference: 8 diffusion steps (configurable) / 推理：8 个扩散步骤（可配置）
+- Predicts SE(3) actions (translation + rotation) and gripper state / 预测 SE(3) 动作（平移+旋转）和夹爪状态
+
+**5. Action Prediction Heads / 动作预测头**:
+- Translation head: Predicts 3D translation / 平移头：预测 3D 平移
+- Rotation head: Predicts rotation (angle-axis) / 旋转头：预测旋转（角轴表示）
+- Gripper head: Predicts gripper open/close state / 夹爪头：预测夹爪开合状态
+
+### Data Flow / 数据流
+
+**Training / 训练:**
+1. Load demonstrations (context demos + live trajectory) / 加载演示（上下文演示 + 实时轨迹）
+2. Encode point clouds → local embeddings / 编码点云 → 局部嵌入
+3. Build heterogeneous graph with scene and gripper nodes / 构建包含场景和夹爪节点的异构图
+4. Process graph with Graph Transformer / 使用图 Transformer 处理图
+5. Add noise to ground truth actions (diffusion forward) / 向真实动作添加噪声（扩散前向过程）
+6. Predict denoised actions (diffusion reverse) / 预测去噪动作（扩散反向过程）
+7. Compute L1 loss on SE(3) actions and gripper state / 计算 SE(3) 动作和夹爪状态的 L1 损失
+
+**Inference / 推理:**
+1. Encode context demonstrations / 编码上下文演示
+2. Encode current observation / 编码当前观测
+3. Build graph and process with Graph Transformer / 构建图并使用图 Transformer 处理
+4. Iteratively denoise actions using DDIM (8 steps) / 使用 DDIM 迭代去噪动作（8 步）
+5. Execute predicted actions in environment / 在环境中执行预测的动作
+
+### Pseudo-Demonstration Generation / 伪演示生成
+
+The pseudo-demo generator (`ip/utils/pseudo_demo_generator.py`) implements paper Appendix D:
+
+伪演示生成器严格实现论文附录 D：
+
+**1. Scene Setup / 场景设置:**
+- Sample 2 objects from ShapeNet (55 categories, 52K+ models) / 从 ShapeNet 采样 2 个物体（55 类别，52K+ 模型）
+- Place randomly on table surface / 随机放置在桌面上
+- Use 3 fixed cameras (no wrist camera) / 使用 3 个固定相机（无腕部相机）
+
+**2. Trajectory Generation / 轨迹生成:**
+- Sample 2-6 waypoints / 采样 2-6 个航点
+- 50% biased sampling toward common tasks (grasp, place, push, open, close) / 50% 偏向常见任务的采样（抓取、放置、推动、打开、关闭）
+- Interpolate with 1cm/3° resolution using linear/cubic/slerp / 使用线性/三次/slerp 以 1cm/3° 分辨率插值
+- **Object attachment:** When gripper closes, attach nearest object; when opens, detach / **物体附加**：夹爪闭合时附加最近物体；打开时分离
+
+**3. Rendering / 渲染:**
+- Render RGB-D from 3 cameras using PyRender / 使用 PyRender 从 3 个相机渲染 RGB-D
+- Generate point clouds from depth images / 从深度图生成点云
+- Segment and process point clouds / 分割和处理点云
+
+**4. Data Augmentation / 数据增强:**
+- 30% of trajectories: Add local perturbations (recovery behavior) / 30% 轨迹：添加局部扰动（恢复行为）
+- 10% of data points: Flip gripper state (re-grasp behavior) / 10% 数据点：翻转夹爪状态（重新抓取行为）
+
+---
+
+## Key Configuration Parameters / 关键配置参数
+
+Located in `ip/configs/base_config.py` / 位于 `ip/configs/base_config.py`：
+
+```python
+config = {
+    'device': 'cuda',              # 'cuda' or 'cpu' / 'cuda' 或 'cpu'
+    'batch_size': 4,               # Training batch size / 训练批大小
+    'num_demos': 2,                # Number of context demonstrations / 上下文演示数量
+    'hidden_dim': 1024,            # Model hidden dimension / 模型隐藏维度
+    'num_scenes_nodes': 16,        # Scene nodes per observation / 每个观测的场景节点数
+    'traj_horizon': 10,            # Trajectory length for demos / 演示轨迹长度
+    'pre_horizon': 8,              # Prediction horizon for actions / 动作预测范围
+    'lr': 1e-5,                    # Learning rate / 学习率
+    'num_diffusion_iters_train': 100,   # Diffusion steps (training) / 扩散步骤（训练）
+    'num_diffusion_iters_test': 8,      # Diffusion steps (inference) / 扩散步骤（推理）
+}
+```
+
+**Memory optimization for 6GB GPU / 6GB 显存优化配置:**
+
+```python
+config = {
+    'batch_size': 1,               # Reduce batch size / 减小批大小
+    'num_demos': 1,                # Reduce demo count / 减少演示数量
+    'hidden_dim': 512,             # Reduce hidden dim / 减小隐藏维度
+    'num_scenes_nodes': 8,         # Reduce scene nodes / 减少场景节点
+    'traj_horizon': 8,             # Shorten trajectory / 缩短轨迹
+}
+```
+
+Use with gradient accumulation in trainer: `accumulate_grad_batches=8`
+
+配合训练器中的梯度累积使用：`accumulate_grad_batches=8`
+
+---
+
+## Important Implementation Details / 重要实现细节
+
+### Scene Encoder Handling / 场景编码器处理
+
+The scene encoder can be missing or pre-trained:
+
+场景编码器可以缺失或预训练：
+
+- ✅ If `scene_encoder.pt` exists: Load pre-trained weights (faster convergence) / 如果 `scene_encoder.pt` 存在：加载预训练权重（更快收敛）
+- ✅ If missing: Train from scratch (automatic fallback) / 如果缺失：从头训练（自动降级）
+- Controlled by `pre_trained_encoder` and `freeze_encoder` config flags / 由 `pre_trained_encoder` 和 `freeze_encoder` 配置标志控制
+
+### Precision and Device / 精度和设备
+
+Training automatically adjusts precision based on device:
+
+训练根据设备自动调整精度：
+
+- CUDA: Uses `16-mixed` precision for memory efficiency / CUDA：使用 `16-mixed` 精度以节省显存
+- CPU: Uses `32` precision (16-mixed not supported on CPU) / CPU：使用 `32` 精度（CPU 不支持 16-mixed）
+
+This is handled automatically in `ip/train.py` line 107.
+
+这在 `ip/train.py` 第 107 行自动处理。
+
+### Data Format / 数据格式
+
+Training samples are saved as individual `.pt` files with structure:
+
+训练样本保存为单独的 `.pt` 文件，结构如下：
+
+```python
+{
+    'demos': [  # List of context demonstrations / 上下文演示列表
+        {
+            'obs': List[np.ndarray],      # Point clouds (N, 3) / 点云
+            'T_w_es': List[np.ndarray],   # Gripper poses (4, 4) / 夹爪姿态
+            'grips': List[float],         # Gripper states / 夹爪状态
+        },
+        ...
+    ],
+    'live': {  # Live trajectory to predict / 要预测的实时轨迹
+        'obs': List[np.ndarray],
+        'T_w_es': List[np.ndarray],
+        'grips': List[float],
+        'actions': List[np.ndarray],      # Ground truth actions (4, 4) / 真实动作
+        'grip_actions': List[float],      # Ground truth gripper actions / 真实夹爪动作
+    }
+}
+```
+
+### Continuous Generation vs Pre-generation / 连续生成 vs 预生成
+
+**Continuous generation / 连续生成** (`train_with_pseudo.py`):
+- ✅ Generates data on-the-fly during training / 训练时动态生成数据
+- ✅ Uses background threads with buffer queue / 使用后台线程和缓冲队列
+- ✅ Paper approach: "continuously generated in parallel" / 论文方法："并行连续生成"
+- ✅ Pros: Infinite data diversity, no storage needed / 优点：无限数据多样性，无需存储
+- ⚠️ Cons: Requires CPU resources during training / 缺点：训练时需要 CPU 资源
+
+**Pre-generation / 预生成** (`generate_pseudo_data.py` + `ip/train.py`):
+- ✅ Generate all data before training / 训练前生成所有数据
+- ✅ Faster training (no generation overhead) / 训练更快（无生成开销）
+- ✅ Pros: Reproducible, easier debugging / 优点：可重现，易于调试
+- ⚠️ Cons: Requires disk storage, limited diversity / 缺点：需要磁盘存储，多样性有限
+
+---
+
+## Common Issues and Solutions / 常见问题与解决方案
+
+### CUDA Out of Memory / CUDA 显存不足
+
+**Symptoms / 症状:** `torch.cuda.OutOfMemoryError`
+
+**Solutions / 解决方案:**
+- Reduce `batch_size` to 1 / 将 `batch_size` 减至 1
+- Reduce `hidden_dim` to 512 / 将 `hidden_dim` 减至 512
+- Reduce `num_scenes_nodes` to 8 / 将 `num_scenes_nodes` 减至 8
+- Use gradient accumulation / 使用梯度累积
+- Or switch to CPU training (much slower but stable) / 或切换到 CPU 训练（慢但稳定）
+
+### Missing scene_encoder.pt / 缺失 scene_encoder.pt
+
+**Status / 状态:** ✅ Automatically handled / 自动处理
+
+- Training will proceed from scratch / 训练将从头开始
+- For better performance, train scene encoder separately or use pre-trained weights / 为获得更好性能，单独训练场景编码器或使用预训练权重
+
+### Validation Set Missing / 验证集缺失
+
+**Solution / 解决方案:**
+```bash
+python generate_pseudo_data.py --gen_val_set=1 --val_tasks=10
+```
+
+Training will skip validation if not found (not critical for pseudo-data training).
+
+如果未找到验证集，训练将跳过验证（对伪数据训练不是关键）。
+
+### Worker Failures in Continuous Generation / 连续生成中的 Worker 失败
+
+**Solutions / 解决方案:**
+- Reduce `--num_generator_threads` (try 1 or 2) / 减少 `--num_generator_threads`（尝试 1 或 2）
+- Reduce `--buffer_size` (try 500) / 减少 `--buffer_size`（尝试 500）
+- Check available RAM (generation is memory-intensive) / 检查可用内存（生成占用大量内存）
+
+### Package Import Errors / 包导入错误
+
+**Check / 检查:**
+```bash
+# Ensure correct environment / 确保正确的环境
+conda activate ip_env
+
+# Verify package location / 验证包位置
+python -c "import ip; print(ip.__file__)"
+# Should point to this directory / 应指向此目录
+```
+
+---
+
+## File Organization / 文件组织
+
+```
+ip/                          # Core package / 核心包
+├── models/                  # Model definitions / 模型定义
+│   ├── diffusion.py         # GraphDiffusion (Lightning module)
+│   ├── model.py             # AGI (main model / 主模型)
+│   ├── graph_rep.py         # Graph representation / 图表示
+│   ├── graph_transformer.py # Graph transformer / 图 Transformer
+│   ├── scene_encoder.py     # Point cloud encoder / 点云编码器
+│   └── occupancy_net.py     # Occupancy network (unused / 未使用)
+├── utils/                   # Utilities / 工具
+│   ├── shapenet_loader.py   # ShapeNet dataset loader / ShapeNet 数据集加载器
+│   ├── pseudo_demo_generator.py  # Pseudo-demo generation / 伪演示生成
+│   ├── continuous_dataset.py     # Continuous generation dataset / 连续生成数据集
+│   ├── running_dataset.py        # Pre-generated data loader / 预生成数据加载器
+│   ├── data_proc.py              # Data processing utilities / 数据处理工具
+│   └── common_utils.py           # Common utilities / 通用工具
+├── configs/                 # Configuration / 配置
+│   └── base_config.py       # Base configuration / 基础配置
+└── train.py                 # Training script (pre-generated data) / 训练脚本（预生成数据）
+
+# Root level scripts / 根目录脚本
+train_with_pseudo.py         # Training with continuous generation / 连续生成训练
+generate_pseudo_data.py      # Batch pseudo-data generation / 批量伪数据生成
+deploy_sim.py                # Simulation deployment / 仿真部署
+sim_utils.py                 # Simulation utilities / 仿真工具
+visualize_pseudo_data.py     # Data visualization / 数据可视化
+quick_start_shapenet.sh      # Quick start script / 快速启动脚本
+manage_checkpoints.sh        # Checkpoint management / Checkpoint 管理
+```
+
+---
+
+## Testing Approach / 测试方法
+
+When making changes / 进行更改时:
+
+1. Test with small scale first / 先进行小规模测试:
+   ```bash
+   python train_with_pseudo.py --num_pseudo_samples=100 --buffer_size=10
+   ```
+
+2. Verify data generation / 验证数据生成:
+   ```bash
+   python generate_pseudo_data.py --num_tasks=1
+   ```
+
+3. Check model forward pass / 检查模型前向传播:
+   - Load model and run inference on single sample / 加载模型并在单个样本上运行推理
+
+4. Monitor memory usage / 监控内存使用:
+   ```bash
+   nvidia-smi  # For GPU / GPU 监控
+   htop        # For CPU / CPU 监控
+   ```
+
+5. Validate on simulation / 在仿真中验证:
+   ```bash
+   python deploy_sim.py --num_rollouts=1
+   ```
+
+---
+
+## Documentation / 文档
+
+Comprehensive documentation is in `docs/` / 完整文档位于 `docs/`：
+
+- `docs/guides/README_SHAPENET_TRAINING.md` - Main training guide / 主要训练指南
+- `docs/guides/PSEUDO_DATA_GENERATION_GUIDE.md` - Data generation details / 数据生成详情
+- `docs/guides/DEPLOYMENT_GUIDE.md` - Deployment guide / 部署指南
+- `docs/README.md` - Documentation index / 文档索引
+
+Also see / 另见:
+- `README.md` - Project overview / 项目概述
+- `PROJECT_SUMMARY.md` - Detailed project summary (Chinese) / 详细项目总结（中文）
+- `VISUALIZATION_README.md` - Visualization guide / 可视化指南
+
+---
+
+## Dependencies / 依赖
+
+Key dependencies (see `requirements.txt` and `environment.yml`):
+
+关键依赖（见 `requirements.txt` 和 `environment.yml`）：
+
+- PyTorch 2.2.0 with CUDA support / 带 CUDA 支持的 PyTorch 2.2.0
+- PyTorch Geometric 2.5.0 (graph neural networks / 图神经网络)
+- PyTorch Lightning 2.4.0 (training framework / 训练框架)
+- Open3D 0.18.0 (point cloud processing / 点云处理)
+- PyRender (scene rendering / 场景渲染)
+- Trimesh (3D mesh processing / 3D 网格处理)
+- RLBench (simulation environment, optional for training / 仿真环境，训练时可选)
+
+**Note / 注意:** PyTorch Geometric has complex dependencies. Use conda for installation:
+
+PyTorch Geometric 依赖复杂，使用 conda 安装：
+
+```bash
+conda env create -f environment.yml
+```
+
+---
+
+## Performance Notes / 性能说明
+
+**Expected training time (paper setup) / 预期训练时间（论文设置）:**
+- 2.5M training steps with ~700K unique trajectories / 2.5M 训练步骤，约 700K 独特轨迹
+- On A100 GPU: ~5-7 days / A100 GPU：约 5-7 天
+- On RTX 3090: ~7-10 days / RTX 3090：约 7-10 天
+- On CPU: Not recommended (100x slower) / CPU：不推荐（慢 100 倍）
+
+**Expected results (paper Table 1) / 预期结果（论文表 1）:**
+- PD only (pseudo-data): 71% average success rate / 仅 PD（伪数据）：71% 平均成功率
+- PD++ (pseudo + real): 82% (unseen) / 97% (seen) / PD++（伪数据+真实数据）：82%（未见）/ 97%（已见）
+
+**Generation speed / 生成速度:**
+- ~1-2 seconds per pseudo-task (5 demos) / 每个伪任务约 1-2 秒（5 个演示）
+- Parallel generation scales linearly with workers / 并行生成随 worker 数量线性扩展
+- 100K tasks: ~30-60 minutes with 8 workers / 100K 任务：8 个 worker 约 30-60 分钟
+
+---
+
+## ShapeNet Dataset / ShapeNet 数据集
+
+Required for pseudo-data generation / 伪数据生成所需:
+
+- Location / 位置: `/media/tianyi/Tiantian/tianyiStudy/DataSets/ShapeNetCore.v2`
+- 55 categories, 52,472 models / 55 个类别，52,472 个模型
+- Update path in scripts if using different location / 如使用不同位置，请更新脚本中的路径
+
+---
+
+## Git Workflow / Git 工作流
+
+Current branch / 当前分支: `main`
+
+When committing / 提交时:
+- Follow existing commit message style (see `git log`) / 遵循现有提交信息风格（见 `git log`）
+- Include co-authorship / 包含共同作者:
+  ```
+  Co-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>
+  ```
+- Stage specific files, avoid `git add -A` (may include sensitive files) / 暂存特定文件，避免 `git add -A`（可能包含敏感文件）
+
+---
+
+## Code Style Notes / 代码风格说明
+
+- Uses PyTorch Lightning for training (not raw PyTorch loops) / 使用 PyTorch Lightning 训练（非原始 PyTorch 循环）
+- Graph operations use PyTorch Geometric (heterogeneous graphs) / 图操作使用 PyTorch Geometric（异构图）
+- Point cloud processing uses Open3D and NumPy / 点云处理使用 Open3D 和 NumPy
+- Rendering uses PyRender (headless mode with EGL) / 渲染使用 PyRender（EGL 无头模式）
+- Configuration via dictionaries (not dataclasses or argparse-only) / 通过字典配置（非 dataclass 或仅 argparse）
+- **Mixed Chinese/English comments (preserve existing style)** / **中英文混合注释（保持现有风格）**

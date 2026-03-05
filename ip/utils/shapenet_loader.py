@@ -13,7 +13,7 @@ from pathlib import Path
 class ShapeNetLoader:
     """Load and manage ShapeNet objects for pseudo-demonstration generation."""
     
-    def __init__(self, shapenet_root='/media/tianyi/Tiantian/tianyiStudy/DataSets/ShapeNetCore.v2'):
+    def __init__(self, shapenet_root='/media/tianyi/Tiantian/tianyiStudy/DataSets/ShapeNetCore.v2', preload_size=0, aggressive_preload=False):
         self.shapenet_root = shapenet_root
         self.categories = self._load_categories()
         self.object_cache = {}
@@ -21,7 +21,14 @@ class ShapeNetLoader:
         print(f"ShapeNet Loader initialized with {len(self.categories)} categories")
         # Pre-load a pool of meshes into memory for fast sampling
         self._preloaded_meshes = []
-        self._preload_mesh_pool(pool_size=500)
+        if aggressive_preload:
+            # Aggressive mode: preload many meshes (10-30 min startup, but much faster generation)
+            print(f"Aggressive preload mode: loading {preload_size} meshes (this will take 10-30 minutes)...")
+            self._preload_mesh_pool(pool_size=preload_size)
+        elif preload_size > 0:
+            self._preload_mesh_pool(pool_size=preload_size)
+        else:
+            print("✓ 快速启动模式：按需加载 mesh（preload_size=0）")
         
     def _load_categories(self):
         """Load all available ShapeNet categories."""

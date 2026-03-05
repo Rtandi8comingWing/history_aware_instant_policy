@@ -17,6 +17,15 @@ class ContinuousPseudoDatasetPyrender(ContinuousPseudoDataset):
         import queue
         import time
         import gc
+        import os
+
+        # CRITICAL: Force EGL platform in each worker thread
+        os.environ['PYOPENGL_PLATFORM'] = 'egl'
+        os.environ['DISPLAY'] = ''  # Clear DISPLAY to avoid X11 interference
+
+        # Import PyRender (will automatically use EGL platform from environment)
+        import pyrender
+        print(f"✓ Worker {worker_id}: PyRender using EGL platform")
 
         generator = PseudoDemoGeneratorPyrender()
 

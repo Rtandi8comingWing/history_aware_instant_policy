@@ -28,7 +28,7 @@ config = {
     # Diffusion config
     'lr': 1e-5,
     'weight_decay': 1e-2,
-    'use_lr_scheduler': False,
+    'use_lr_scheduler': True,
     'num_warmup_steps': 1000,
     'num_diffusion_iters_train': 100,
     'num_diffusion_iters_test': 8,

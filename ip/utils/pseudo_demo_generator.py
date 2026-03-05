@@ -269,11 +269,8 @@ class PseudoDemoGenerator:
 
     def render_observations(self, scene: Dict,
                             gripper_poses: List[np.ndarray],
-                            target_points: int = 4096) -> List[np.ndarray]:
-        """Generate point clouds via trimesh surface sampling (no OpenGL needed).
-        Scene points are sampled once and reused across all poses for speed.
-        """
-        # Sample scene objects once (geometry doesn't change per frame)
+                            target_points: int = 2048) -> List[np.ndarray]:  # 修复 1: 默认改为 2048
+        """Generate point clouds via trimesh surface sampling (no OpenGL needed)."""
         scene_pts_list = []
         for obj in scene['objects']:
             tm = obj['mesh'].copy()
@@ -290,15 +287,10 @@ class PseudoDemoGenerator:
 
         scene_pts = np.concatenate(scene_pts_list, axis=0) if scene_pts_list else np.zeros((0, 3))
 
-        # Pre-transform gripper canonical points per pose (pure numpy, no trimesh per frame)
         point_clouds = []
         for pose in gripper_poses:
-            # Transform pre-sampled canonical gripper pts to world frame
-            homog_g = np.concatenate([self._gripper_pts_canonical,
-                                      np.ones((len(self._gripper_pts_canonical), 1))], axis=1)
-            g_pts = (pose @ homog_g.T).T[:, :3]
+            # 修复 2: 彻底移除夹爪点云 (g_pts) 的拼接逻辑
             all_pts = [scene_pts] if len(scene_pts) > 0 else []
-            all_pts.append(g_pts)
 
             combined = np.concatenate(all_pts, axis=0) if all_pts else np.random.randn(target_points, 3) * 0.05
 
@@ -316,7 +308,7 @@ class PseudoDemoGenerator:
 
         return point_clouds
 
-    def add_data_augmentation(self, poses, gripper_states, point_clouds):
+    def add_data_augmentation(self, poses, gripper_states):
         if random.random() < 0.3:
             for i in range(1, len(poses)):
                 poses[i][:3, 3] += np.random.randn(3) * 0.005
@@ -325,17 +317,21 @@ class PseudoDemoGenerator:
         if random.random() < 0.1:
             flip_idx = random.randint(0, len(gripper_states) - 1)
             gripper_states[flip_idx] = 1 - gripper_states[flip_idx]
-        return poses, gripper_states, point_clouds
+        return poses, gripper_states
 
     def generate_pseudo_demonstration(self, objects: List[trimesh.Trimesh]) -> Dict:
         scene = self.create_scene(objects)
         self.setup_cameras(scene)
         waypoints = self.sample_waypoints(scene, objects)
         poses, gripper_states = self.generate_trajectory(waypoints, scene, objects)
+        
+        # 修复 4: 【致命 Bug 修正】先施加扰动，再渲染视觉！
+        poses, gripper_states = self.add_data_augmentation(poses, gripper_states)
+        
+        # 此时渲染出的点云，能完美对应加噪后的真实物理视角
         point_clouds = self.render_observations(scene, poses)
         del scene
-        poses, gripper_states, point_clouds = self.add_data_augmentation(
-            poses, gripper_states, point_clouds)
+        
         return {
             'pcds': point_clouds,
             'T_w_es': poses,

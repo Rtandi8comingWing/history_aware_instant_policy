@@ -66,6 +66,8 @@ if __name__ == '__main__':
     else:
         config['save_dir'] = save_dir
         config['record'] = record
+        if bs is not None:                  # 👈 补上这行
+            config['batch_size'] = bs       # 👈 补上这行
         
         # Check if scene_encoder.pt exists, if not disable pre-trained encoder
         if not os.path.exists(config['scene_encoder_path']):
@@ -114,7 +116,7 @@ if __name__ == '__main__':
         enable_progress_bar=True,
         precision=precision,  # Auto-adjust based on device
         accumulate_grad_batches=8,  # Gradient accumulation for memory efficiency
-        val_check_interval=20000 if dataloader_val else None,  # Skip validation if no val set
+        val_check_interval=10000 if dataloader_val else None,  # Skip validation if no val set
         num_sanity_val_steps=2 if dataloader_val else 0,
         check_val_every_n_epoch=None,
         logger=logger,

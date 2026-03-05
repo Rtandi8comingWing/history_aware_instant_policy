@@ -52,11 +52,12 @@ class ContinuousPseudoDataset(Dataset):
         self.rand_g_prob = rand_g_prob
         self.num_context_demos = num_context_demos
         
-        # Initialize ShapeNet loader
+        # Initialize ShapeNet loader (fast startup mode)
         print(f"Initializing ShapeNet loader from {shapenet_root}...")
-        self.shapenet_loader = ShapeNetLoader(shapenet_root)
+        self.shapenet_loader = ShapeNetLoader(shapenet_root, preload_size=0)
         print(f"Loaded {self.shapenet_loader.get_num_categories()} categories, "
               f"{self.shapenet_loader.get_num_models()} models")
+        print(f"Note: Using on-demand mesh loading for fast startup.")
         
         # Buffer for pre-generated samples
         self.buffer = queue.Queue(maxsize=buffer_size)

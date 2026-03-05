@@ -11,6 +11,14 @@ import os
 import sys
 from pathlib import Path
 
+# CRITICAL: Force EGL platform BEFORE importing PyRender
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+os.environ['DISPLAY'] = ''  # Clear DISPLAY to avoid X11 interference
+
+# Import PyRender (will automatically use EGL platform from environment)
+import pyrender
+print("✓ PyRender will use EGL platform (from PYOPENGL_PLATFORM env)")
+
 import lightning as L
 import pickle
 import torch

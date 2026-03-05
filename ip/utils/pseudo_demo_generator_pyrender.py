@@ -4,8 +4,17 @@ Strictly follows paper Appendix D:
   "We record gripper poses and segmented point cloud observations
    using PyRender and three simulated depth cameras."
 """
+import os
 import numpy as np
 from typing import List, Dict
+
+# CRITICAL: Force EGL platform BEFORE importing PyRender
+os.environ['PYOPENGL_PLATFORM'] = 'egl'
+os.environ['DISPLAY'] = ''  # Clear DISPLAY to avoid X11 interference
+
+# Import PyRender (will automatically use EGL platform from environment)
+import pyrender
+
 from ip.utils.pseudo_demo_generator import PseudoDemoGenerator
 
 
@@ -22,6 +31,15 @@ class PseudoDemoGeneratorPyrender(PseudoDemoGenerator):
         self.fy = 525.0
         self.cx = image_width / 2.0
         self.cy = image_height / 2.0
+
+        print("✓ PseudoDemoGeneratorPyrender: Using EGL platform")
+
+        # 单实例复用渲染器，避免多线程 EGL Context 竞态
+        self.renderer = pyrender.OffscreenRenderer(
+            viewport_width=self.image_width,
+            viewport_height=self.image_height
+        )
+        print("✓ OffscreenRenderer 初始化完成（单实例复用模式）")
 
     def setup_cameras(self, scene: Dict):
         """3 fixed cameras: front, left_shoulder, right_shoulder."""
@@ -55,7 +73,7 @@ class PseudoDemoGeneratorPyrender(PseudoDemoGenerator):
 
     def render_observations(self, scene: Dict,
                             gripper_poses: List[np.ndarray],
-                            target_points: int = 4096) -> List[np.ndarray]:
+                            target_points: int = 2048) -> List[np.ndarray]:
         """
         Render depth from 3 cameras per timestep, back-project to point cloud.
         Paper: spacing 1cm/3deg, 3 cameras, no wrist camera.
@@ -109,13 +127,13 @@ class PseudoDemoGeneratorPyrender(PseudoDemoGenerator):
             except Exception:
                 pass
 
-        # Add gripper
-        gripper = self.gripper_mesh.copy()
-        gripper.apply_transform(gripper_pose)
-        try:
-            pr_scene.add(pyrender.Mesh.from_trimesh(gripper, smooth=False))
-        except Exception:
-            pass
+        # # Add gripper
+        # gripper = self.gripper_mesh.copy()
+        # gripper.apply_transform(gripper_pose)
+        # try:
+        #     pr_scene.add(pyrender.Mesh.from_trimesh(gripper, smooth=False))
+        # except Exception:
+        #     pass
 
         # Add camera
         camera = pyrender.IntrinsicsCamera(
@@ -126,11 +144,12 @@ class PseudoDemoGeneratorPyrender(PseudoDemoGenerator):
         pr_scene.add(camera, pose=cam_pose)
 
         # Render depth only
-        renderer = pyrender.OffscreenRenderer(self.image_width, self.image_height)
+        # 使用单实例复用渲染器（已在 __init__ 中初始化）
         try:
-            depth = renderer.render(pr_scene, flags=pyrender.RenderFlags.DEPTH_ONLY)
+            depth = self.renderer.render(pr_scene, flags=pyrender.RenderFlags.DEPTH_ONLY)
         finally:
-            renderer.delete()
+            # 渲染器复用，不在此处删除（由 __del__ 统一管理）
+            pass
 
         # Back-project to camera-frame 3D
         valid = (depth > 0.01) & (depth < 3.0)
@@ -145,3 +164,13 @@ class PseudoDemoGeneratorPyrender(PseudoDemoGenerator):
         # Transform to world frame
         homog = np.concatenate([pts_cam, np.ones((len(pts_cam), 1))], axis=1)
         return (cam_pose @ homog.T).T[:, :3]
+
+    def __del__(self):
+        """垃圾回收时安全释放渲染器"""
+        if hasattr(self, "renderer"):
+            try:
+                self.renderer.delete()
+                print("✓ OffscreenRenderer 已释放")
+            except Exception as e:
+                print(f"警告: 释放渲染器时出错: {e}")
+
