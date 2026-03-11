@@ -32,7 +32,7 @@ config = {
     'num_warmup_steps': 1000,
     'num_diffusion_iters_train': 100,
     'num_diffusion_iters_test': 8,
-    'num_iters': 50000000001,
+    'num_iters': 2500000,  # 2.5M steps as per paper
 
     'test_every': 50000,
     'randomize_g_prob': 0.1,
