@@ -135,7 +135,33 @@ def main():
                        help='Batch size')
     parser.add_argument('--compile_models', type=int, default=0,
                        help='Compile models for faster training [0, 1]')
-    
+
+    # =========================================================================
+    # HA-IGD: History-Aware parameters
+    # =========================================================================
+    parser.add_argument('--enable_track_nodes', type=int, default=0,
+                       help='Enable track nodes for HA-IGD [0, 1]')
+    parser.add_argument('--memory_task_ratio', type=float, default=0.3,
+                       help='Ratio of memory tasks in training')
+    parser.add_argument('--track_history_len', type=int, default=16,
+                       help='History length for track encoding')
+    parser.add_argument('--track_points_per_obj', type=int, default=5,
+                       help='Number of points per object for track')
+    parser.add_argument('--track_n_max', type=int, default=5,
+                       help='Maximum number of tracked objects')
+    parser.add_argument('--track_age_norm_max_sec', type=float, default=2.0,
+                       help='Max seconds for track age normalization')
+    parser.add_argument('--curriculum_dropout_start', type=float, default=0.05,
+                       help='Initial dropout rate for track nodes')
+    parser.add_argument('--curriculum_dropout_end', type=float, default=0.25,
+                       help='Final dropout rate for track nodes')
+    parser.add_argument('--soft_membership_sigma', type=float, default=0.05,
+                       help='Sigma for RBF soft membership')
+    parser.add_argument('--control_hz', type=float, default=15.0,
+                       help='Control frequency Hz')
+    parser.add_argument('--track_refresh_hz', type=float, default=3.0,
+                       help='Track refresh frequency Hz')
+
     args = parser.parse_args()
     
     record = bool(args.record)
@@ -186,30 +212,57 @@ def main():
         config_loaded['batch_size'] = args.batch_size
         config_loaded['save_dir'] = save_dir
         config_loaded['record'] = record
-        
+
         model = GraphDiffusion.load_from_checkpoint(
             f'{args.model_path}/{args.model_name}',
             config=config_loaded,
             strict=False,
             map_location=config_loaded['device']
         ).to(config_loaded['device'])
-        
+
         if compile_models:
             model.model.compile_models()
-        
+
         current_config = config_loaded
     else:
         print("\nCreating new model...")
         config['save_dir'] = save_dir
         config['record'] = record
         config['batch_size'] = args.batch_size
-        
+
         # Check if scene_encoder.pt exists, if not disable pre-trained encoder
         if not os.path.exists(config['scene_encoder_path']):
             print(f"Warning: scene_encoder.pt not found at {config['scene_encoder_path']}")
             print("Training from scratch without pre-trained scene encoder")
             config['pre_trained_encoder'] = False
-        
+
+        # =========================================================================
+        # HA-IGD: Update config with command line arguments
+        # =========================================================================
+        config['enable_track_nodes'] = bool(args.enable_track_nodes)
+        config['memory_task_ratio'] = args.memory_task_ratio
+        config['track_history_len'] = args.track_history_len
+        config['track_points_per_obj'] = args.track_points_per_obj
+        config['track_n_max'] = args.track_n_max
+        config['track_age_norm_max_sec'] = args.track_age_norm_max_sec
+        config['curriculum_dropout_start'] = args.curriculum_dropout_start
+        config['curriculum_dropout_end'] = args.curriculum_dropout_end
+        config['soft_membership_sigma'] = args.soft_membership_sigma
+        config['control_hz'] = args.control_hz
+        config['track_refresh_hz'] = args.track_refresh_hz
+
+        # Print HA-IGD config if enabled
+        if config['enable_track_nodes']:
+            print("\n" + "=" * 40)
+            print("HA-IGD: History-Aware Mode Enabled")
+            print("=" * 40)
+            print(f"  Track nodes: {config['enable_track_nodes']}")
+            print(f"  Memory task ratio: {config['memory_task_ratio']}")
+            print(f"  Track history len: {config['track_history_len']}")
+            print(f"  Track n_max: {config['track_n_max']}")
+            print(f"  Curriculum dropout: {config['curriculum_dropout_start']} -> {config['curriculum_dropout_end']}")
+            print("=" * 40)
+
         model = GraphDiffusion(config).to(config['device'])
         current_config = config
     
@@ -224,7 +277,16 @@ def main():
         buffer_size=args.buffer_size,
         num_generator_threads=args.num_generator_threads,
         rand_g_prob=current_config['randomize_g_prob'],
-        num_context_demos=current_config['num_demos']
+        num_context_demos=current_config['num_demos'],
+        # HA-IGD parameters
+        enable_track_nodes=current_config.get('enable_track_nodes', False),
+        memory_task_ratio=current_config.get('memory_task_ratio', 0.3),
+        track_history_len=current_config.get('track_history_len', 16),
+        track_points_per_obj=current_config.get('track_points_per_obj', 5),
+        track_n_max=current_config.get('track_n_max', 5),
+        track_age_norm_max_sec=current_config.get('track_age_norm_max_sec', 2.0),
+        control_hz=current_config.get('control_hz', 15.0),
+        track_refresh_hz=current_config.get('track_refresh_hz', 3.0),
     )
     
     # Create dataloader (possibly mixed with real data)

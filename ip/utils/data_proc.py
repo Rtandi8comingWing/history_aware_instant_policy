@@ -1,5 +1,5 @@
 import numpy as np
-import open3d as o3d
+# import open3d as o3d  # Temporarily disabled for training
 from scipy.spatial.transform import Rotation as Rot
 from ip.utils.common_utils import transform_pcd
 import torch
