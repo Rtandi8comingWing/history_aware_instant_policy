@@ -1,6 +1,7 @@
 from torch_geometric.data import HeteroData
 from torch import nn
 import torch
+import numpy as np
 from ip.utils.common_utils import printarr, PositionalEncoder
 from ip.utils.common_utils import SinusoidalPosEmb
 
@@ -19,6 +20,41 @@ class GraphRep(nn.Module):
         self.embd_dim = config['local_nn_dim']
         self.pred_horizon = config['pre_horizon']
         self.pos_in_nodes = config['pos_in_nodes']
+
+        # =========================================================================
+        # HA-IGD: Track node configuration
+        # =========================================================================
+        self.enable_track_nodes = config.get('enable_track_nodes', False)
+        self.track_n_max = config.get('track_n_max', 5)
+        self.track_history_len = config.get('track_history_len', 16)
+        self.track_points_per_obj = config.get('track_points_per_obj', 5)
+        self.track_hidden_dim = config.get('track_hidden_dim', 512)
+        self.track_age_embed_dim = config.get('track_age_embed_dim', 32)
+        self.track_age_norm_max_sec = config.get('track_age_norm_max_sec', 2.0)
+
+        # Soft membership
+        self.soft_membership_sigma = config.get('soft_membership_sigma', 0.05)
+
+        # Graph topology flags (V0)
+        self.enable_track_track_edges = config.get('enable_track_track_edges', False)
+        self.enable_track_geo_edges = config.get('enable_track_geo_edges', True)
+        self.enable_demo_current_track_edges = config.get('enable_demo_current_track_edges', True)
+        self.enable_current_track_to_action_edges = config.get('enable_current_track_to_action_edges', True)
+
+        # Curriculum dropout
+        self.curriculum_dropout_rate = config.get('curriculum_dropout_start', 0.05)
+        self.track_modality_dropout_eval = config.get('track_modality_dropout_eval', 0.0)
+
+        # Track encoder (imported lazily to avoid circular imports)
+        self._track_encoder = None
+
+        # =========================================================================
+        # HA-IGD: Track node embeddings (learnable)
+        # =========================================================================
+        if self.enable_track_nodes:
+            self.track_embds = nn.Embedding(
+                self.track_n_max,
+                self.embd_dim, device=self.device)
         ################################################################################################################
         # These will be used to represent the gripper node positions.
         self.gripper_node_pos = torch.tensor([
@@ -46,7 +82,7 @@ class GraphRep(nn.Module):
         self.gripper_da_gripper_embds = nn.Embedding(1, self.edge_dim, device=self.device)
         ################################################################################################################
         # Define the structure of the graph.
-        self.node_types = ['scene', 'gripper']
+        self.node_types = ['scene', 'gripper', 'track']
         self.edge_types = [
             # Local observation subgraphs.
             ('scene', 'rel', 'scene'),
@@ -60,6 +96,10 @@ class GraphRep(nn.Module):
             ('gripper', 'time_action', 'gripper'),
             # Propagating information from demo to action.
             ('gripper', 'demo_action', 'gripper'),
+            # HA-IGD: Track edges
+            ('track', 'rel', 'track'),
+            ('track', 'rel', 'scene'),
+            ('track', 'rel', 'gripper'),
         ]
         self.graph = None
         ################################################################################################################
@@ -138,6 +178,18 @@ class GraphRep(nn.Module):
                                                       device=self.device)
         gripper_demo = torch.cat([gripper_demo, gripper_current], dim=0)
 
+        # =========================================================================
+        # HA-IGD: Track nodes (per batch, per track index)
+        # Only for current observation (not demos), max track_n_max tracks per batch
+        # =========================================================================
+        if self.enable_track_nodes:
+            track_batch = sb[:, None].repeat(1, self.track_n_max).view(-1)  # [B * Nmax]
+            track_idx = torch.arange(self.track_n_max, device=self.device)[None, :].repeat(
+                self.batch_size, 1).view(-1)  # [B * Nmax]
+        else:
+            track_batch = torch.tensor([], dtype=torch.long, device=self.device)
+            track_idx = torch.tensor([], dtype=torch.long, device=self.device)
+
         return {
             'scene': {
                 'batch': scene_batch,
@@ -150,6 +202,10 @@ class GraphRep(nn.Module):
                 'node': gripper_node,
                 'embd': gripper_emdb,
                 'demo': gripper_demo,
+            },
+            'track': {
+                'batch': track_batch,
+                'track_idx': track_idx,
             }
         }
 
@@ -258,6 +314,67 @@ class GraphRep(nn.Module):
         self.graph[('scene', 'rel_demo', 'scene')].edge_index = dense_s_s[:, s_rel_s_mask_demo]
         self.graph[('gripper', 'rel_cond', 'gripper')].edge_index = dense_g_g[:, g_tc_g]
 
+        # =========================================================================
+        # HA-IGD: Track node edges
+        # =========================================================================
+        if self.enable_track_nodes and 'track' in node_info and node_info['track']['batch'].shape[0] > 0:
+            num_track_nodes = node_info['track']['batch'].shape[0]
+
+            # Dense edges for track-track, track-scene, track-gripper
+            dense_t_t = self.create_dense_edge_idx(num_track_nodes, num_track_nodes)
+
+            # Current scene nodes are at index after demo scenes: (demo * traj + current)
+            # scene nodes: demo scenes + current scene + action scenes
+            # current scene starts at: batch_size * num_demos * traj_horizon * num_scenes_nodes
+            num_scene_nodes = node_info['scene']['batch'].shape[0]
+            num_gripper_nodes = node_info['gripper']['batch'].shape[0]
+
+            # For track->scene: connect each track node to current scene nodes (not demo)
+            # Current scene nodes are at indices: [demo_scenes : demo_scenes + current_scenes]
+            demo_scene_count = self.batch_size * self.num_demos * self.traj_horizon * self.num_scenes_nodes
+            current_scene_start = demo_scene_count
+            current_scene_count = self.batch_size * self.num_scenes_nodes
+            current_scene_end = current_scene_start + current_scene_count
+
+            # Track to current scene
+            dense_t_s = torch.cartesian_prod(
+                torch.arange(num_track_nodes, dtype=torch.long, device=self.device),
+                torch.arange(current_scene_start, current_scene_end, dtype=torch.long, device=self.device)
+            ).t()
+
+            # Track to gripper (current gripper at traj_horizon)
+            # Gripper nodes: demo gripper + current gripper + action gripper
+            demo_gripper_count = self.batch_size * self.num_demos * self.traj_horizon * self.num_g_nodes
+            current_gripper_start = demo_gripper_count
+            current_gripper_count = self.batch_size * self.num_g_nodes
+
+            dense_t_g = torch.cartesian_prod(
+                torch.arange(num_track_nodes, dtype=torch.long, device=self.device),
+                torch.arange(current_gripper_start, current_gripper_start + current_gripper_count, dtype=torch.long, device=self.device)
+            ).t()
+
+            # Edge masks
+            # Track-track: same batch
+            t_rel_t_mask = node_info['track']['batch'][dense_t_t[0]] == node_info['track']['batch'][dense_t_t[1]]
+
+            # Track-scene: same batch
+            # Scene batch indices: scene_batch values for current scene nodes
+            current_scene_batch = node_info['scene']['batch'][current_scene_start:current_scene_end]
+            t_rel_s_mask = node_info['track']['batch'][dense_t_s[0]] == current_scene_batch[dense_t_s[1] - current_scene_start]
+
+            # Track-gripper: same batch
+            current_gripper_batch = node_info['gripper']['batch'][current_gripper_start:current_gripper_start + current_gripper_count]
+            t_rel_g_mask = node_info['track']['batch'][dense_t_g[0]] == current_gripper_batch[dense_t_g[1] - current_gripper_start]
+
+            # Assign edge indices
+            self.graph[('track', 'rel', 'track')].edge_index = dense_t_t[:, t_rel_t_mask]
+            self.graph[('track', 'rel', 'scene')].edge_index = dense_t_s[:, t_rel_s_mask]
+            self.graph[('track', 'rel', 'gripper')].edge_index = dense_t_g[:, t_rel_g_mask]
+
+            # Store track node metadata
+            self.graph.track_batch = node_info['track']['batch']
+            self.graph.track_idx = node_info['track']['track_idx']
+
     def update_graph(self, data):
         # Adding information to the graph structure create in initialise_graph.
         # scene_node_pos: # [B, N, T, S, 3]
@@ -328,6 +445,41 @@ class GraphRep(nn.Module):
         self.graph['scene'].pos = scene_node_pos
         self.graph['scene'].x = scene_node_embd
 
+        # =========================================================================
+        # HA-IGD: Track node position and features
+        # =========================================================================
+        if self.enable_track_nodes and hasattr(data, 'track_node_embds') and data.track_node_embds is not None:
+            # data.track_node_embds: [B, N, embd_dim]
+            B, N, Emb = data.track_node_embds.shape
+            track_emb_flat = data.track_node_embds.reshape(-1, Emb)  # [B*N, embd_dim]
+
+            # Track positions: use last point of each track as position
+            # data.current_track_seq: [B, N, H, P, 3]
+            if hasattr(data, 'current_track_seq') and data.current_track_seq is not None:
+                # Take last timestep, last point of each track
+                track_pos = data.current_track_seq[:, :, -1, 0, :]  # [B, N, 3] - use first point per object for simplicity
+                # Actually take mean of last frame
+                track_pos = data.current_track_seq[:, :, -1, :, :].mean(dim=2)  # [B, N, 3]
+                track_pos_flat = track_pos.reshape(-1, 3)  # [B*N, 3]
+            else:
+                # Fallback: zero positions
+                track_pos_flat = torch.zeros(B * N, 3, device=self.device)
+
+            # Assign to graph
+            self.graph['track'].pos = track_pos_flat
+            self.graph['track'].x = track_emb_flat
+
+            # Add positional encoding if enabled
+            if self.pos_in_nodes:
+                self.graph['track'].x = torch.cat(
+                    [self.graph['track'].x, self.pos_embd(self.graph['track'].pos)], dim=-1)
+        else:
+            # No track data - create empty placeholder
+            if self.enable_track_nodes:
+                # Create empty track node
+                self.graph['track'].pos = torch.empty(0, 3, device=self.device)
+                self.graph['track'].x = torch.empty(0, self.embd_dim, device=self.device)
+
         if self.pos_in_nodes:
             self.graph['gripper'].x = \
                 torch.cat([self.graph['gripper'].x, self.pos_embd(self.graph['gripper'].pos)], dim=-1)
@@ -354,16 +506,101 @@ class GraphRep(nn.Module):
         self.add_rel_edge_attr('gripper', 'gripper', edge='demo',
                                all_T_w_e=all_T_w_e, all_T_e_w=all_T_e_w)
 
+        # =========================================================================
+        # HA-IGD: Track edge attributes
+        # =========================================================================
+        if self.enable_track_nodes:
+            self.add_rel_edge_attr('track', 'track')
+            self.add_rel_edge_attr('track', 'scene')
+            self.add_rel_edge_attr('track', 'gripper')
+
     def add_rel_edge_attr(self, source, dest, edge='rel', all_T_w_e=None, all_T_e_w=None):
+        # Retrieve edge index for this relation
+        edge_idx = self.graph[(source, edge, dest)].edge_index
+
+        # If there are no edges of this type, create an empty edge_attr tensor and return early
+        if edge_idx.numel() == 0:
+            empty_attr = torch.empty((0, self.edge_dim), device=self.device)
+            self.graph[(source, edge, dest)].edge_attr = empty_attr
+            return
+
+        # Validate and filter edge indices to prevent out-of-bounds access
+        num_source_nodes = self.graph[source].pos.shape[0]
+        num_dest_nodes = self.graph[dest].pos.shape[0]
+
+        # Create mask for valid edges (both source and dest indices must be in range)
+        valid_src_mask = (edge_idx[0] >= 0) & (edge_idx[0] < num_source_nodes)
+        valid_dst_mask = (edge_idx[1] >= 0) & (edge_idx[1] < num_dest_nodes)
+        valid_mask = valid_src_mask & valid_dst_mask
+
+        # If no valid edges remain, return empty edge_attr
+        if not valid_mask.any():
+            empty_attr = torch.empty((0, self.edge_dim), device=self.device)
+            self.graph[(source, edge, dest)].edge_attr = empty_attr
+            # Also update edge_index to be empty
+            self.graph[(source, edge, dest)].edge_index = torch.empty((2, 0), dtype=torch.long, device=self.device)
+            return
+
+        # Filter edge indices to only valid ones
+        edge_idx_filtered = edge_idx[:, valid_mask]
+
+        # Update the graph's edge_index with filtered version
+        self.graph[(source, edge, dest)].edge_index = edge_idx_filtered
+
         if all_T_w_e is None:
-            pos_dest = self.graph[dest].pos[self.graph[(source, edge, dest)].edge_index[1]]
-            pos_source = self.graph[source].pos[self.graph[(source, edge, dest)].edge_index[0]]
+            # No relative transform – direct edge
+            pos_dest = self.graph[dest].pos[edge_idx_filtered[1]]
+            pos_source = self.graph[source].pos[edge_idx_filtered[0]]
             pos_dest_rot = pos_dest
         else:
-            pos_source = self.graph[source].pos[self.graph[(source, edge, dest)].edge_index[0]]
-            T_i_j = torch.bmm(all_T_e_w[self.graph[(source, edge, dest)].edge_index[0]],
-                              all_T_w_e[self.graph[(source, edge, dest)].edge_index[1]])
+            # Edge defined via relative SE(3) transform
+            pos_source = self.graph[source].pos[edge_idx_filtered[0]]
+
+            # Also validate transform indices
+            num_transforms = all_T_w_e.shape[0]
+            valid_transform_src = (edge_idx_filtered[0] >= 0) & (edge_idx_filtered[0] < num_transforms)
+            valid_transform_dst = (edge_idx_filtered[1] >= 0) & (edge_idx_filtered[1] < num_transforms)
+            valid_transform_mask = valid_transform_src & valid_transform_dst
+
+            if not valid_transform_mask.all():
+                # Further filter if some transform indices are invalid
+                edge_idx_filtered = edge_idx_filtered[:, valid_transform_mask]
+                self.graph[(source, edge, dest)].edge_index = edge_idx_filtered
+
+                if edge_idx_filtered.shape[1] == 0:
+                    empty_attr = torch.empty((0, self.edge_dim), device=self.device)
+                    self.graph[(source, edge, dest)].edge_attr = empty_attr
+                    return
+
+                pos_source = self.graph[source].pos[edge_idx_filtered[0]]
+
+            T_i_j = torch.bmm(
+                all_T_e_w[edge_idx_filtered[0]],
+                all_T_w_e[edge_idx_filtered[1]],
+            )
             pos_dest_rot = torch.bmm(T_i_j[..., :3, :3], pos_source[..., None]).squeeze(-1)
             pos_dest = pos_source + T_i_j[..., :3, 3]
-        self.graph[(source, edge, dest)].edge_attr = torch.cat([self.pos_embd(pos_dest - pos_source),
-                                                                self.pos_embd(pos_dest_rot - pos_source)], dim=-1)
+
+        # -------------------------------------------------
+        # Numerical stability (both branches)
+        # -------------------------------------------------
+        # Replace NaN/Inf with zeros
+        pos_source = torch.where(torch.isfinite(pos_source), pos_source,
+                                 torch.zeros_like(pos_source))
+        pos_dest = torch.where(torch.isfinite(pos_dest), pos_dest,
+                               torch.zeros_like(pos_dest))
+        pos_dest_rot = torch.where(torch.isfinite(pos_dest_rot), pos_dest_rot,
+                                   torch.zeros_like(pos_dest_rot))
+
+        # Clamp to a safe range (values >10 cause sin/cos overflow)
+        pos_source = torch.clamp(pos_source, -10.0, 10.0)
+        pos_dest = torch.clamp(pos_dest, -10.0, 10.0)
+        pos_dest_rot = torch.clamp(pos_dest_rot, -10.0, 10.0)
+
+        pos_diff = pos_dest - pos_source
+        pos_rot_diff = pos_dest_rot - pos_source
+
+        # Edge attribute concatenates positional encodings for both diff and rot diff
+        self.graph[(source, edge, dest)].edge_attr = torch.cat(
+            [self.pos_embd(pos_diff), self.pos_embd(pos_rot_diff)], dim=-1
+        )

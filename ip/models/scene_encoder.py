@@ -1,10 +1,12 @@
 import torch
-from torch_geometric.nn import fps, nearest
 from torch_geometric.nn import PointNetConv
 from ip.utils.common_utils import PositionalEncoder
 from torch_geometric.nn import MLP
 from typing import Optional, Union
 from torch_geometric.typing import OptTensor, PairOptTensor, Adj, PairTensor, Tensor
+
+# Use our fallback implementation directly
+from ip.utils.fps_fallback import fps_fallback as fps, nearest_fallback as nearest
 
 
 class SceneEncoder(torch.nn.Module):

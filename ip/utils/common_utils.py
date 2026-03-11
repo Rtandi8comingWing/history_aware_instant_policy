@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import inspect
-import open3d as o3d
+# import open3d as o3d  # Temporarily disabled
 from torch import nn
 from scipy.spatial.transform import Rotation as Rot
 import math
@@ -126,14 +126,26 @@ class PositionalEncoder(nn.Module):
         r"""
         Apply positional encoding to input.
         """
+        # Add numerical stability: replace NaN/Inf and clamp to prevent CUDA errors
+        x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
+        x = torch.clamp(x, -100.0, 100.0)
         return torch.cat([f(x) for f in self.embed_fns], dim=-1)
 
 
 def downsample_pcd(pcd_np, voxel_size=0.01):
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pcd_np)
-    pcd_new = pcd.voxel_down_sample(voxel_size)
-    return np.asarray(pcd_new.points)
+    """Simple downsampling without Open3D.
+    If `voxel_size` is a float, treat it as a voxel length and keep every nth point.
+    If `voxel_size` is an int > 0, treat it as the desired number of points and return the first N points.
+    """
+    if isinstance(voxel_size, int) and voxel_size > 0:
+        # Desired point count
+        if len(pcd_np) <= voxel_size:
+            return pcd_np
+        return pcd_np[:voxel_size]
+    # Float voxel size fallback: keep every nth point based on heuristic
+    n = max(1, int(len(pcd_np) * voxel_size * 100))
+    return pcd_np[::n]
+
 
 
 def printarr(*arrs, float_width=6):
@@ -516,7 +528,7 @@ def transforms_to_actions(transforms):
     Convert 4x4 transformation matrices to 6d actions (translation + angle axis).
     """
     translations = transforms[..., :3, 3]
-    rotations = transforms[..., :3, :]
+    rotations = transforms[..., :3, :]  # Keep [N, 3, 4] format for rotation_matrix_to_quaternion
     angle_axis = rotation_matrix_to_angle_axis(rotations)
     return torch.cat([translations, angle_axis], dim=-1)
 

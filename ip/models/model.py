@@ -10,6 +10,13 @@ import torch.nn as nn
 from ip.utils.common_utils import dfs_freeze
 from ip.models.graph_rep import GraphRep
 
+# HA-IGD imports
+try:
+    from ip.models.graph_rep_haigd import HAIGDGraphBuilder, build_track_encoder
+    HAIGD_AVAILABLE = True
+except ImportError:
+    HAIGD_AVAILABLE = False
+
 
 class AGI(torch.nn.Module):
     def __init__(self, config):
@@ -25,6 +32,9 @@ class AGI(torch.nn.Module):
         self.num_layers = config['num_layers']
         compile_models = config['compile_models']
 
+        # HA-IGD track nodes config
+        self.enable_track_nodes = config.get('enable_track_nodes', False)
+
         self.scene_encoder = SceneEncoder(num_freqs=10,
                                           embd_dim=config['local_nn_dim']).to(config['device'])
         if self.config['pre_trained_encoder']:
@@ -35,6 +45,14 @@ class AGI(torch.nn.Module):
         self.graph = GraphRep(config)
         self.graph.initialise_graph()
 
+        # HA-IGD: Track encoder (if enabled)
+        if self.enable_track_nodes and HAIGD_AVAILABLE:
+            self.track_encoder = build_track_encoder(config)
+            self.haigd_builder = HAIGDGraphBuilder(config)
+        else:
+            self.track_encoder = None
+            self.haigd_builder = None
+
         in_channels = self.local_embd_dim
         if config['pos_in_nodes']:
             in_channels += self.graph.edge_dim // 2
@@ -43,11 +61,15 @@ class AGI(torch.nn.Module):
                                               hidden_channels=config['hidden_dim'],
                                               heads=config['hidden_dim'] // 64,
                                               num_layers=self.num_layers,
-                                              metadata=(['scene', 'gripper'],
+                                              metadata=(['scene', 'gripper', 'track'],
                                                         [
                                                             ('scene', 'rel', 'scene'),
                                                             ('scene', 'rel', 'gripper'),
                                                             ('gripper', 'rel', 'gripper'),
+                                                            # Track edges (currently no connections, placeholders for future)
+                                                            ('track', 'rel', 'scene'),
+                                                            ('track', 'rel', 'gripper'),
+                                                            ('track', 'rel', 'track'),
                                                         ]),
                                               edge_dim=self.graph.edge_dim,
                                               dropout=0.0,
@@ -57,12 +79,16 @@ class AGI(torch.nn.Module):
                                              hidden_channels=config['hidden_dim'],
                                              heads=config['hidden_dim'] // 64,
                                              num_layers=self.num_layers,
-                                             metadata=(['gripper', 'scene'],
+                                             metadata=(['gripper', 'scene', 'track'],
                                                        [
                                                            ('gripper', 'cond', 'gripper'),
                                                            ('gripper', 'demo', 'gripper'),
                                                            ('scene', 'rel_demo', 'gripper'),
                                                            ('scene', 'rel_demo', 'scene'),
+                                                           # Track edges
+                                                           ('track', 'rel', 'track'),
+                                                           ('track', 'rel', 'scene'),
+                                                           ('track', 'rel', 'gripper'),
                                                        ]),
                                              edge_dim=self.graph.edge_dim,
                                              dropout=0.0,
@@ -72,12 +98,16 @@ class AGI(torch.nn.Module):
                                                hidden_channels=config['hidden_dim'],
                                                heads=config['hidden_dim'] // 64,
                                                num_layers=self.num_layers,
-                                               metadata=(['gripper', 'scene'],
+                                               metadata=(['gripper', 'scene', 'track'],
                                                          [
                                                              ('gripper', 'time_action', 'gripper'),
                                                              ('gripper', 'rel_cond', 'gripper'),
                                                              ('scene', 'rel_action', 'gripper'),
                                                              ('scene', 'rel_action', 'scene'),
+                                                             # Track edges
+                                                             ('track', 'rel', 'track'),
+                                                             ('track', 'rel', 'scene'),
+                                                             ('track', 'rel', 'gripper'),
                                                          ]),
                                                edge_dim=self.graph.edge_dim,
                                                dropout=0.0,
@@ -153,6 +183,40 @@ class AGI(torch.nn.Module):
         return gripper_points
 
     def forward(self, data):
+        # =========================================================================
+        # HA-IGD: Encode track nodes (if enabled)
+        # =========================================================================
+        if self.enable_track_nodes and self.track_encoder is not None:
+            if hasattr(data, 'current_track_seq') and data.current_track_seq is not None:
+                # Encode current track
+                # After batch collate: [B, Nmax, H, P, 3]
+                B = data.current_track_seq.shape[0]
+                Nmax = data.current_track_seq.shape[1]
+                H = data.current_track_seq.shape[2]
+                P = data.current_track_seq.shape[3]
+
+                # Track encoder expects [B, N, H*P, 3]
+                track_seq_flat = data.current_track_seq.reshape(B, Nmax, H * P, 3)
+                track_emb = self.track_encoder(
+                    point_tracks=track_seq_flat,
+                    track_ages=data.current_track_age_sec,
+                    track_valid=data.current_track_valid
+                )  # [B, N, hidden_dim]
+
+                # Apply curriculum dropout (if enabled)
+                if self.haigd_builder is not None:
+                    track_emb = self.haigd_builder.apply_dropout(track_emb, training=self.training)
+
+                # Store for later use
+                data.track_node_embds = track_emb
+            else:
+                data.track_node_embds = None
+        else:
+            data.track_node_embds = None
+
+        # =========================================================================
+        # Original IP forward pass
+        # =========================================================================
         if not hasattr(data, 'demo_scene_node_embds'):
             data.demo_scene_node_embds, data.demo_scene_node_pos = self.get_demo_scene_emb(data)
 
@@ -215,6 +279,17 @@ class AGI(torch.nn.Module):
         preds_g = self.prediction_head_g(x_gripper)
         preds = torch.cat([preds_t, preds_rot, preds_g], dim=-1)
         return preds
+
+    # =========================================================================
+    # HA-IGD: Curriculum dropout step
+    # =========================================================================
+    def step(self):
+        """更新 HA-IGD curriculum dropout rate"""
+        if self.haigd_builder is not None:
+            self.haigd_builder.step()
+            # Sync with graph
+            if hasattr(self.graph, 'curriculum_dropout_rate'):
+                self.graph.curriculum_dropout_rate = self.haigd_builder.current_dropout
 
     def get_demo_scene_emb(self, data):
         bs = data.actions.shape[0]
