@@ -101,6 +101,8 @@ def main():
                        help='Size of pre-generation buffer')
     parser.add_argument('--num_generator_threads', type=int, default=4,
                        help='Number of background generation threads')
+    parser.add_argument('--preload_size', type=int, default=0,
+                       help='Number of meshes to preload into memory (0=on-demand, -1=all)')
     
     # Training settings
     parser.add_argument('--run_name', type=str, default='pseudo_train',
@@ -278,6 +280,7 @@ def main():
         num_generator_threads=args.num_generator_threads,
         rand_g_prob=current_config['randomize_g_prob'],
         num_context_demos=current_config['num_demos'],
+        preload_size=args.preload_size,
         # HA-IGD parameters
         enable_track_nodes=current_config.get('enable_track_nodes', False),
         memory_task_ratio=current_config.get('memory_task_ratio', 0.3),

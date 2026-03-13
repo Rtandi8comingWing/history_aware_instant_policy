@@ -37,6 +37,7 @@ class ContinuousPseudoDataset(Dataset):
                  num_generator_threads=4,
                  rand_g_prob=0.0,
                  num_context_demos=2,
+                 preload_size=0,
                  # HA-IGD track parameters
                  enable_track_nodes=False,
                  memory_task_ratio=0.3,
@@ -58,6 +59,7 @@ class ContinuousPseudoDataset(Dataset):
             num_generator_threads: Number of background generation threads
             rand_g_prob: Probability to randomize gripper state (0.1 in paper)
             num_context_demos: Fixed number of context demos (for batching)
+            preload_size: Number of meshes to preload into memory (0=on-demand, -1=all)
             enable_track_nodes: 是否启用历史轨迹节点 (HA-IGD)
             memory_task_ratio: 记忆任务采样比例
             track_history_len: 轨迹历史帧数
@@ -75,6 +77,7 @@ class ContinuousPseudoDataset(Dataset):
         self.pred_horizon = pred_horizon
         self.rand_g_prob = rand_g_prob
         self.num_context_demos = num_context_demos
+        self.preload_size = preload_size
 
         # HA-IGD track parameters
         self.enable_track_nodes = enable_track_nodes
@@ -90,12 +93,17 @@ class ContinuousPseudoDataset(Dataset):
         # Global step counter for curriculum scheduling
         self._global_step = 0
         
-        # Initialize ShapeNet loader (fast startup mode)
+        # Initialize ShapeNet loader
         print(f"Initializing ShapeNet loader from {shapenet_root}...")
-        self.shapenet_loader = ShapeNetLoader(shapenet_root, preload_size=0)
+        self.shapenet_loader = ShapeNetLoader(shapenet_root, preload_size=preload_size)
         print(f"Loaded {self.shapenet_loader.get_num_categories()} categories, "
               f"{self.shapenet_loader.get_num_models()} models")
-        print(f"Note: Using on-demand mesh loading for fast startup.")
+        if preload_size > 0:
+            print(f"✓ Preloaded {preload_size} meshes into memory (faster generation)")
+        elif preload_size == -1:
+            print(f"✓ Preloading all meshes into memory (may take time)")
+        else:
+            print(f"✓ Quick startup mode: on-demand mesh loading (preload_size=0)")
 
         # Initialize memory task generator (HA-IGD)
         if self.enable_track_nodes:
